@@ -99,7 +99,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("public_keys_res: {:?}", public_keys_res);
 
             // 验证签名
-            let messages_with_key: Result<Vec<String>, std::io::Error> = public_keys_res.iter().map(|public_key_hex| {
+            let messages_with_key: Result<Vec<String>, std::io::Error> = public_keys_res[1..].iter().map(|public_key_hex| {
                 let message_with_key = format!("{}:{}", public_key_hex, message);
                 println!("message_with_key: {}", message_with_key);
                 Ok(message_with_key)
@@ -111,7 +111,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let valid = verify_messages(
                 &signature, 
                 &messages_with_key.iter().map(|m| m.as_bytes()).collect::<Vec<&[u8]>>(), 
-                &public_keys_res.iter().map(|k| {
+                &public_keys_res[1..].iter().map(|k| {
                     let public_key_bytes = hex::decode(k).unwrap();
                     PublicKey::from_bytes(&public_key_bytes).unwrap()
                 }).collect::<Vec<PublicKey>>()

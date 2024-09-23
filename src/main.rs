@@ -48,7 +48,7 @@ async fn send_public_key(key_collector: &str, public_key: &str) {
 
     match response {
         Ok(res) if res.status().is_success() => {
-            println!("Public key sent successfully.");
+            println!("Public key sent successfully. pk: {}", public_key);
         },
         Ok(res) => {
             eprintln!("Failed to send public key. Server responded with status: {}", res.status());
@@ -70,10 +70,12 @@ async fn receive_message(
     tokio::spawn(async move {
         let mut signatures = Vec::new();        
         let state = state_clone.lock().await;
-        
+        let message = msg.get("message").unwrap();
+        let message_str = message.as_str().unwrap();    
+        println!("message: {}", message_str);
         
         for node in &state.other_nodes {
-            match send_to_node(node, &msg).await {
+            match send_to_node(node, message_str).await {
                 Ok(signature) => {
                     println!("Received signature from node: {}", node);
                     signatures.push(signature);
@@ -96,10 +98,9 @@ async fn receive_message(
     HttpResponse::Ok().json(json!({ "request_id": request_id }))
 }
 
-async fn send_to_node(addr: &str, msg: &serde_json::Value) -> std::io::Result<Signature> {
+async fn send_to_node(addr: &str, msg: &str) -> std::io::Result<Signature> {
     let mut stream = TcpStream::connect(addr).await?;
-    let msg_str = serde_json::to_string(msg)?;
-    stream.write_all(msg_str.as_bytes()).await?;
+    stream.write_all(msg.as_bytes()).await?;
 
     // 读取签名结果
     let mut buf = [0; 96]; // BLS签名大小
@@ -136,6 +137,7 @@ async fn run_node_service(addr: &str, key_collector: &str) -> std::io::Result<()
                     let public_key_bytes = keypair_clone.public_key().as_bytes();
                     let public_key_hex = hex::encode(public_key_bytes);
                     let message_with_key = format!("{}:{}", public_key_hex, received);
+                    println!("message_with_key: {}", message_with_key);
                     let signature: Signature = keypair_clone.sign(message_with_key.as_bytes());
 
                     // 发送签名结果回主节点
