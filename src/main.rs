@@ -4,12 +4,13 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use clap::Parser;
-use k256::ecdsa::{SigningKey, Signature, signature::Signer};
 use rand_core::OsRng;
 use hex;
 use std::collections::HashMap;
 use uuid::Uuid;
 use serde_json::json;
+use bls_signatures::{aggregate, PrivateKey as KeyPair, Serialize, Signature}; // 更新为 Keypair
+use reqwest::Client; // 导入 reqwest 用于发送 HTTP 请求
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -22,16 +23,40 @@ struct Args {
 
     #[arg(short, long)]
     other_nodes: Vec<String>,
+
+    #[arg(short, long)]
+    key_collector: String, // 新增公钥收集服务的地址
 }
 
 // 共享状态，用于存储其他节点的地址
 struct AppState {
     other_nodes: Vec<String>,
-    pending_requests: Mutex<HashMap<String, Vec<Vec<u8>>>>,
+    pending_requests: Mutex<HashMap<String, Vec<u8>>>,
 }
 
 async fn hello() -> impl Responder {
     HttpResponse::Ok().body("Hello, world!")
+}
+
+async fn send_public_key(key_collector: &str, public_key: &str) {
+    let client = Client::new();
+    let response = client
+        .post(format!("{}/receive_key", key_collector))
+        .json(&public_key)
+        .send()
+        .await;
+
+    match response {
+        Ok(res) if res.status().is_success() => {
+            println!("Public key sent successfully.");
+        },
+        Ok(res) => {
+            eprintln!("Failed to send public key. Server responded with status: {}", res.status());
+        },
+        Err(e) => {
+            eprintln!("Error sending public key: {}", e);
+        }
+    }
 }
 
 async fn receive_message(
@@ -43,17 +68,29 @@ async fn receive_message(
     
     let state_clone = state.clone();
     tokio::spawn(async move {
-        let mut signatures = Vec::new();
+        let mut signatures = Vec::new();        
         let state = state_clone.lock().await;
+        
+        
         for node in &state.other_nodes {
             match send_to_node(node, &msg).await {
-                Ok(signature) => signatures.push(signature.to_bytes()),
+                Ok(signature) => {
+                    println!("Received signature from node: {}", node);
+                    signatures.push(signature);
+                },
                 Err(e) => eprintln!("Failed to send message to {} or receive signature: {}", node, e),
             }
         }
+
         
-        let mut pending_requests = state.pending_requests.lock().await;
-        pending_requests.insert(request_id_clone, signatures.iter().map(|s| s.to_vec()).collect());
+        // 聚合所有签名
+        if !signatures.is_empty() {
+            let aggregated_signature = aggregate_signatures(&signatures).await;
+            println!("Aggregated Signature: {:?}", aggregated_signature);
+            let mut pending_requests = state.pending_requests.lock().await;
+            pending_requests.insert(request_id_clone, aggregated_signature.as_bytes());
+        }
+        
     });
 
     HttpResponse::Ok().json(json!({ "request_id": request_id }))
@@ -65,24 +102,29 @@ async fn send_to_node(addr: &str, msg: &serde_json::Value) -> std::io::Result<Si
     stream.write_all(msg_str.as_bytes()).await?;
 
     // 读取签名结果
-    let mut buf = [0; 64];
+    let mut buf = [0; 96]; // BLS签名大小
     stream.read_exact(&mut buf).await?;
-    let signature = Signature::from_slice(&buf)
+    let signature = Signature::from_bytes(&buf)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
     Ok(signature)
 }
 
-async fn run_node_service(addr: &str) -> std::io::Result<()> {
+async fn run_node_service(addr: &str, key_collector: &str) -> std::io::Result<()> {
     let listener = TcpListener::bind(addr).await?;
     println!("Node service listening on {}", addr);
 
-    // 生成签名密钥
-    let signing_key = SigningKey::random(&mut OsRng);
+    // 生成BLS签名密钥
+    let keypair = KeyPair::generate(&mut OsRng);
+    let public_key = keypair.public_key().as_bytes(); // 获取公钥
+
+    // 将公钥发送到公钥收集服务
+    let public_key_hex = hex::encode(public_key);
+    send_public_key(key_collector, &public_key_hex).await;
 
     loop {
         let (mut socket, _) = listener.accept().await?;
-        let key = signing_key.clone();
+        let keypair_clone = keypair.clone();
         tokio::spawn(async move {
             let mut buf = [0; 1024];
             match socket.read(&mut buf).await {
@@ -90,11 +132,14 @@ async fn run_node_service(addr: &str) -> std::io::Result<()> {
                     let received = String::from_utf8_lossy(&buf[..n]);
                     println!("Node service received: {}", received);
 
-                    // 对消息进行签名
-                    let signature: Signature = key.sign(received.as_bytes());
+                    // 对消息进行BLS签名
+                    let public_key_bytes = keypair_clone.public_key().as_bytes();
+                    let public_key_hex = hex::encode(public_key_bytes);
+                    let message_with_key = format!("{}:{}", public_key_hex, received);
+                    let signature: Signature = keypair_clone.sign(message_with_key.as_bytes());
 
                     // 发送签名结果回主节点
-                    if let Err(e) = socket.write_all(signature.to_bytes().as_slice()).await {
+                    if let Err(e) = socket.write_all(signature.as_bytes().as_slice()).await {
                         eprintln!("Failed to send signature: {}", e);
                     }
                 }
@@ -102,6 +147,11 @@ async fn run_node_service(addr: &str) -> std::io::Result<()> {
             }
         });
     }
+}
+
+// 新增聚合签名的逻辑
+async fn aggregate_signatures(signatures: &[Signature]) -> Signature {
+    aggregate(signatures).unwrap() // 聚合签名
 }
 
 async fn check_status(
@@ -113,7 +163,7 @@ async fn check_status(
     let pending_requests = state.pending_requests.lock().await;
     
     match pending_requests.get(&request_id) {
-        Some(signatures) => HttpResponse::Ok().json(signatures.iter().map(|s| hex::encode(s)).collect::<Vec<String>>()),
+        Some(signature) => HttpResponse::Ok().json(hex::encode(signature.as_slice())),
         None => HttpResponse::Ok().body("processing"),
     }
 }
@@ -130,7 +180,7 @@ async fn main() -> std::io::Result<()> {
     // 启动节点服务
     let node_addr = args.node_addr.clone();
     tokio::spawn(async move {
-        run_node_service(&node_addr).await.unwrap();
+        run_node_service(&node_addr, &args.key_collector).await.unwrap();
     });
 
     // 启动 Web 服务
