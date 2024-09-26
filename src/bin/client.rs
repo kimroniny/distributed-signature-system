@@ -2,7 +2,8 @@ use clap::{Parser, Subcommand};
 use reqwest::Client;
 use serde_json::json;
 use std::time::Duration;
-use bls_signatures::{PublicKey, Serialize, Signature, verify_messages}; // 导入 BLS 签名和公钥
+use bn254::{PrivateKey, PublicKey, ECDSA, Signature};
+use substrate_bn::{Group, G2};
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -84,10 +85,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // 解析签名
             let signature_bytes = hex::decode(signature_res)?;
             println!("signature_bytes: {:?}", signature_bytes);
-            let signature = Signature::from_bytes(&signature_bytes)
+            let signature = Signature::from_compressed(&signature_bytes)
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
-            println!("signature: {:?}", signature.as_bytes());
+            println!("signature: {:?}", signature);
 
             // 获取所有公钥
             let public_keys_res = client
@@ -98,27 +99,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .await?;
             println!("public_keys_res: {:?}", public_keys_res);
 
+            // 聚合公钥
+            let public_keys = public_keys_res[1..].iter().map(|public_key_hex| {
+                let public_key_bytes = hex::decode(public_key_hex).unwrap();
+                PublicKey::from_compressed(&public_key_bytes).unwrap()
+            }).collect::<Vec<PublicKey>>();
+            let aggregated_public_key = public_keys.iter().fold(PublicKey(G2::zero()), |acc, x| acc + *x);
+
             // 验证签名
-            let messages_with_key: Result<Vec<String>, std::io::Error> = public_keys_res[1..].iter().map(|public_key_hex| {
-                let message_with_key = format!("{}:{}", public_key_hex, message);
-                println!("message_with_key: {}", message_with_key);
-                Ok(message_with_key)
-            }).collect();
-            let messages_with_key = messages_with_key?;
-            for (i, message) in messages_with_key.iter().enumerate() {
-                println!("Message {}: {:?}", i + 1, message);
-            }
-            let valid = verify_messages(
-                &signature, 
-                &messages_with_key.iter().map(|m| m.as_bytes()).collect::<Vec<&[u8]>>(), 
-                &public_keys_res[1..].iter().map(|k| {
-                    let public_key_bytes = hex::decode(k).unwrap();
-                    PublicKey::from_bytes(&public_key_bytes).unwrap()
-                }).collect::<Vec<PublicKey>>()
-            );
-
-
-            if valid {
+            if let Ok(_) = ECDSA::verify(&message, &signature, &aggregated_public_key) {
                 println!("Signature is valid.");
             } else {
                 println!("Signature is invalid.");

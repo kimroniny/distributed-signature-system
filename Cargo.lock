@@ -755,6 +755,7 @@ name = "distributed-signature-system"
 version = "0.1.0"
 dependencies = [
  "actix-web",
+ "ark-bn254",
  "bn254",
  "bn254_hash2curve",
  "clap",

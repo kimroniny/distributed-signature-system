@@ -1,3 +1,7 @@
+#![allow(unused_imports)]
+#![allow(unused_variables)]
+#![allow(dead_code)]
+use actix_web::web::BytesMut;
 use actix_web::{web, App, HttpResponse, HttpServer, Responder};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -9,8 +13,13 @@ use hex;
 use std::collections::HashMap;
 use uuid::Uuid;
 use serde_json::json;
-use bls_signatures::{aggregate, PrivateKey as KeyPair, Serialize, Signature}; // 更新为 Keypair
 use reqwest::Client; // 导入 reqwest 用于发送 HTTP 请求
+use core::slice;
+use std::ops::Neg;
+use num_bigint::BigUint;
+use bn254::{PrivateKey, PublicKey, ECDSA, Signature};
+use k256::{elliptic_curve::bigint::Encoding, U256};
+use substrate_bn::{Group, G1};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -90,7 +99,7 @@ async fn receive_message(
             let aggregated_signature = aggregate_signatures(&signatures).await;
             println!("Aggregated Signature: {:?}", aggregated_signature);
             let mut pending_requests = state.pending_requests.lock().await;
-            pending_requests.insert(request_id_clone, aggregated_signature.as_bytes());
+            pending_requests.insert(request_id_clone, aggregated_signature.to_compressed().unwrap());
         }
         
     });
@@ -103,9 +112,10 @@ async fn send_to_node(addr: &str, msg: &str) -> std::io::Result<Signature> {
     stream.write_all(msg.as_bytes()).await?;
 
     // 读取签名结果
-    let mut buf = [0; 96]; // BLS签名大小
-    stream.read_exact(&mut buf).await?;
-    let signature = Signature::from_bytes(&buf)
+    let mut buf = BytesMut::with_capacity(1024); // BLS签名大小
+    stream.read_buf(&mut buf).await?;
+    println!("Received signature: {:?}", buf);
+    let signature = Signature::from_compressed(&buf)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
     Ok(signature)
@@ -116,32 +126,32 @@ async fn run_node_service(addr: &str, key_collector: &str) -> std::io::Result<()
     println!("Node service listening on {}", addr);
 
     // 生成BLS签名密钥
-    let keypair = KeyPair::generate(&mut OsRng);
-    let public_key = keypair.public_key().as_bytes(); // 获取公钥
+    let private_key = PrivateKey::random(&mut OsRng);
+    let public_key = PublicKey::from_private_key(&private_key);
 
     // 将公钥发送到公钥收集服务
-    let public_key_hex = hex::encode(public_key);
+    let public_key_hex = hex::encode(public_key.to_compressed().unwrap());
     send_public_key(key_collector, &public_key_hex).await;
 
     loop {
         let (mut socket, _) = listener.accept().await?;
-        let keypair_clone = keypair.clone();
+        let keypair_clone = private_key.to_bytes().unwrap().clone();
         tokio::spawn(async move {
             let mut buf = [0; 1024];
+            let private_key_clone = PrivateKey::try_from(keypair_clone.as_slice()).unwrap();
             match socket.read(&mut buf).await {
                 Ok(n) if n > 0 => {
                     let received = String::from_utf8_lossy(&buf[..n]);
                     println!("Node service received: {}", received);
 
-                    // 对消息进行BLS签名
-                    let public_key_bytes = keypair_clone.public_key().as_bytes();
-                    let public_key_hex = hex::encode(public_key_bytes);
-                    let message_with_key = format!("{}:{}", public_key_hex, received);
-                    println!("message_with_key: {}", message_with_key);
-                    let signature: Signature = keypair_clone.sign(message_with_key.as_bytes());
+                    let message = received.as_bytes();
+                    
+                    // let hash_point = hash_to_try_and_increment(message).unwrap();
+                    // TODO 使用合约中的hash_point来签名
+                    let signature = ECDSA::sign(&message, &private_key_clone).unwrap();
 
                     // 发送签名结果回主节点
-                    if let Err(e) = socket.write_all(signature.as_bytes().as_slice()).await {
+                    if let Err(e) = socket.write_all(signature.to_compressed().unwrap().as_slice()).await {
                         eprintln!("Failed to send signature: {}", e);
                     }
                 }
@@ -153,7 +163,7 @@ async fn run_node_service(addr: &str, key_collector: &str) -> std::io::Result<()
 
 // 新增聚合签名的逻辑
 async fn aggregate_signatures(signatures: &[Signature]) -> Signature {
-    aggregate(signatures).unwrap() // 聚合签名
+    signatures.iter().fold(Signature(G1::zero()), |acc, sig| acc + *sig)
 }
 
 async fn check_status(

@@ -21,6 +21,7 @@ substrate-bn = "0.6.0"
 num-bigint = "0.4.6"
 num-traits = "0.2.19"
 bn254_hash2curve ={ git = "https://github.com/hashcloak/bn254-hash-to-curve.git", features = ["gnark_crypto_compatible"]}
+ark-bn254 = "0.4.0"
 
 [overrides]
 subtle = "2.5.0"
@@ -40,3 +41,7 @@ path = "src/example/bls.rs"
 [[example]]
 name = "bls_bn"
 path = "src/example/bls_bn.rs"
+
+[[example]]
+name = "bn_hash2curve"
+path = "src/example/bn_hash2curve.rs"
