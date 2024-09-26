@@ -15,11 +15,15 @@ hex = "0.4.3"
 reqwest = { version = "0.11", features = ["json"] }
 uuid = { version = "1.3", features = ["v4"] }
 rand = "0.8.5"
-bls-signatures = "0.15.0"
+# bls-signatures = "0.15.0"
 bn254 = "0.0.1"
 substrate-bn = "0.6.0"
 num-bigint = "0.4.6"
 num-traits = "0.2.19"
+bn254_hash2curve ={ git = "https://github.com/hashcloak/bn254-hash-to-curve.git", features = ["gnark_crypto_compatible"]}
+
+[overrides]
+subtle = "2.5.0"
 
 [[bin]]
 name = "distributed-signature-system"
